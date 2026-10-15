@@ -1,0 +1,147 @@
+name: validate-windows
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [rdw-push]
+  schedule:
+    # Run nightly at 03:00 UTC.
+    - cron: '0 3 * * *'
+
+concurrency:
+  group: validate-windows
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  validate:
+    name: Build + validate (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout main RDW repo
+        uses: actions/checkout@v4
+        with:
+          repository: heictojpgpics/rust-data-recovery-wizard
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: validate-windows
+
+      - name: Build (release)
+        run: cargo build --release --workspace
+
+      - name: Run unit tests
+        run: cargo test --workspace --all-targets --no-fail-fast
+
+      - name: Generate NTFS fixture
+        shell: pwsh
+        run: |
+          # Create a 4 MB VHD, format as NTFS, write a few files, detach.
+          # We use diskpart + PowerShell.
+          $vhdPath = "$env:TEMP\test_ntfs.vhd"
+          $mountPoint = "$env:TEMP\test_ntfs_mount"
+          New-Item -ItemType Directory -Path $mountPoint -Force | Out-Null
+          
+          # Create VHD via diskpart.
+          $diskpartScript = @"
+          create vdisk file="$vhdPath" maximum=4 type=fixed
+          attach vdisk
+          create partition primary
+          format fs=ntfs label="TESTNTFS" quick
+          assign mount="$mountPoint"
+          exit
+          "@
+          $diskpartScript | Out-File -FilePath "$env:TEMP\dp.txt" -Encoding ASCII
+          diskpart /s "$env:TEMP\dp.txt"
+          
+          # Write test files.
+          "Hello, World!" | Out-File -FilePath "$mountPoint\hello.txt" -Encoding ASCII
+          "Test file 2" | Out-File -FilePath "$mountPoint\test2.txt" -Encoding ASCII
+          
+          # Detach.
+          $detachScript = @"
+          select vdisk file="$vhdPath"
+          detach vdisk
+          exit
+          "@
+          $detachScript | Out-File -FilePath "$env:TEMP\dp2.txt" -Encoding ASCII
+          diskpart /s "$env:TEMP\dp2.txt"
+          
+          Write-Host "Fixture created at $vhdPath"
+
+      - name: Generate FAT32 fixture
+        shell: pwsh
+        run: |
+          $vhdPath = "$env:TEMP\test_fat32.vhd"
+          $mountPoint = "$env:TEMP\test_fat32_mount"
+          New-Item -ItemType Directory -Path $mountPoint -Force | Out-Null
+          $diskpartScript = @"
+          create vdisk file="$vhdPath" maximum=4 type=fixed
+          attach vdisk
+          create partition primary
+          format fs=fat32 label="TESTFAT" quick
+          assign mount="$mountPoint"
+          exit
+          "@
+          $diskpartScript | Out-File -FilePath "$env:TEMP\dp_fat.txt" -Encoding ASCII
+          diskpart /s "$env:TEMP\dp_fat.txt"
+          "Hello FAT32!" | Out-File -FilePath "$mountPoint\hello.txt" -Encoding ASCII
+          $detachScript = @"
+          select vdisk file="$vhdPath"
+          detach vdisk
+          exit
+          "@
+          $detachScript | Out-File -FilePath "$env:TEMP\dp_fat2.txt" -Encoding ASCII
+          diskpart /s "$env:TEMP\dp_fat2.txt"
+
+      - name: Upload fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixtures
+          path: |
+            ${{ env.TEMP }}\test_ntfs.vhd
+            ${{ env.TEMP }}\test_fat32.vhd
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            target/release/*.exe
+            target/release/*.pdb
+          if-no-files-found: warn
+          retention-days: 14
+
+  notify-main-repo:
+    name: Notify main repo of validation result
+    needs: validate
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Send status to main repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.RDW_PAT }}
+          repository: heictojpgpics/rust-data-recovery-wizard
+          event-type: validation-result
+          client-payload: |
+            {
+              "validation_status": "${{ needs.validate.result }}",
+              "validation_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }

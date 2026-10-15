@@ -1,0 +1,7 @@
+*.vhd
+*.vhdx
+*.img
+*.iso
+*.dmg
+target/
+**/target/

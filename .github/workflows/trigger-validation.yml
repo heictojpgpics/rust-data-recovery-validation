@@ -1,0 +1,26 @@
+name: trigger-validation
+
+# This workflow lives in the MAIN repo (rust-data-recovery-wizard) and
+# triggers the validation repo on every push to main.
+# TODO: copy this workflow to the main repo's .github/workflows/ directory.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  trigger:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Trigger validation repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.RDW_PAT }}
+          repository: heictojpgpics/rust-data-recovery-validation
+          event-type: rdw-push
+          client-payload: |
+            {
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref }}",
+              "commit_message": "${{ github.event.head_commit.message }}"
+            }
